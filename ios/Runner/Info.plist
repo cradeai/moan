@@ -54,6 +54,8 @@
 	<string>Moan uses motion detection for interactive sound effects when you shake or tap your phone.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Moan uses your speed in Car Mode to create sound effects based on how fast you're going.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Moan uses your speed in Car Mode to create sound effects based on how fast you're going.</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
