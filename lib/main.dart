@@ -113,13 +113,7 @@ class _MoanPageState extends State<MoanPage> {
     _startLoop();
     _startListening();
     _decayTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-      if (_testMode && _score > 0) {
-        // Slow decay for test slider (~15 sec full fade)
-        setState(() {
-          _score = (_score - 6.67 * 0.05).clamp(0.0, _maxScoreLimit);
-          if (_score == 0) _testMode = false;
-        });
-      } else if (_score > 0) {
+      if (_score > 0) {
         setState(() {
           _score = (_score - _decayRate * 0.05).clamp(0.0, _maxScoreLimit);
         });
@@ -307,11 +301,8 @@ class _MoanPageState extends State<MoanPage> {
   Position? _lastPosition;
   double _minSpeedSinceLastTrigger = 0;
   DateTime _minSpeedTime = DateTime.now();
-  bool _testMode = false;
   double _lastSpeedForAccel = 0;
   DateTime _lastAccelTime = DateTime.now();
-  double _testSpeed = 0;
-  DateTime _lastTestSpeedTime = DateTime.now();
   static const double _speedJumpThreshold = 20.0; // km/h
   static const int _jumpWindowMs = 3000; // must happen within 3 sec
 
@@ -374,13 +365,20 @@ class _MoanPageState extends State<MoanPage> {
     setState(() {
       _currentSpeed = smoothed;
       _currentForce = smoothed;
-      if (!_testMode && accel > 3) {
+      if (accel > 3) {
         final points = (accel - 3) * (accel - 3) * 0.6;
         _score = (_score + points).clamp(0.0, _maxScoreLimit);
         if (_score > _maxScore) _maxScore = _score;
+        _flash = true;
       }
       _gpsDebug = 'GPS #$_gpsUpdates | ${speedKmh.toStringAsFixed(0)} km/h | accel: ${accel.toStringAsFixed(1)}';
     });
+
+    if (accel > 3) {
+      Future.delayed(const Duration(milliseconds: 150), () {
+        if (mounted) setState(() => _flash = false);
+      });
+    }
   }
 
   void _onMotion(UserAccelerometerEvent event) {
@@ -452,11 +450,6 @@ class _MoanPageState extends State<MoanPage> {
               const Text('Moan', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white)),
               Text(_carMode ? 'Drive faster...' : 'Shake or slap your phone',
                   style: TextStyle(fontSize: 14, color: Colors.white.withValues(alpha: 0.5))),
-              if (_carMode && _gpsDebug.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(_gpsDebug, style: TextStyle(fontSize: 10, color: Colors.green.withValues(alpha: 0.6))),
-                ),
 
               const SizedBox(height: 24),
 
@@ -560,77 +553,7 @@ class _MoanPageState extends State<MoanPage> {
 
               const Spacer(),
 
-              // Test slider
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 40),
-                child: Column(
-                  children: [
-                    Text(_carMode ? 'Test Speed (km/h)' : 'Test Score',
-                        style: TextStyle(fontSize: 13, color: Colors.orange.withValues(alpha: 0.5))),
-                    Slider(
-                      value: _carMode ? _testSpeed : _score,
-                      min: 0,
-                      max: _carMode ? 150 : 100,
-                      activeColor: Colors.orange,
-                      inactiveColor: Colors.white.withValues(alpha: 0.1),
-                      onChanged: (v) {
-                        if (_carMode) {
-                          // Simulate speed change → compute acceleration → add to score
-                          final now = DateTime.now();
-                          final dt = now.difference(_lastTestSpeedTime).inMilliseconds / 1000.0;
-                          if (dt > 0.05) {
-                            final accel = (v - _testSpeed) / dt;
-                            setState(() {
-                              _testSpeed = v;
-                              _currentSpeed = v;
-                              _lastTestSpeedTime = now;
-                              _testMode = true;
-                              if (accel > 3) {
-                                final points = (accel - 3) * (accel - 3) * 0.6;
-                                _score = (_score + points).clamp(0.0, _maxScoreLimit);
-                                if (_score > _maxScore) _maxScore = _score;
-                              }
-                            });
-                          }
-                        } else {
-                          setState(() {
-                            _score = v;
-                            _testMode = true;
-                          });
-                        }
-                      },
-                    ),
-                  ],
-                ),
-              ),
-
-              // Sensitivity (only in shake mode)
-              if (!_carMode)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 40),
-                  child: Column(
-                    children: [
-                      Text('Sensitivity', style: TextStyle(fontSize: 13, color: Colors.white.withValues(alpha: 0.5))),
-                      Slider(
-                        value: _sensitivity, min: 1.0, max: 15.0,
-                        activeColor: Colors.purple,
-                        inactiveColor: Colors.white.withValues(alpha: 0.1),
-                        onChanged: (v) => setState(() => _sensitivity = v),
-                      ),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text('Sensitive', style: TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.3))),
-                          Text('Hard', style: TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.3))),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-
-              if (_carMode) const SizedBox(height: 16),
-
-              const SizedBox(height: 8),
+              const SizedBox(height: 16),
 
               // Car mode toggle
               GestureDetector(
@@ -641,40 +564,19 @@ class _MoanPageState extends State<MoanPage> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                   decoration: BoxDecoration(
-                    color: _carMode ? Colors.orange.shade800 : Colors.white.withValues(alpha: 0.08),
+                    color: _carMode ? Colors.purple.shade800 : Colors.orange.shade800,
                     borderRadius: BorderRadius.circular(30),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.directions_car, color: Colors.white, size: 18),
+                      Icon(_carMode ? Icons.vibration : Icons.directions_car, color: Colors.white, size: 18),
                       const SizedBox(width: 8),
                       Text(
-                        _carMode ? 'Car Mode ON' : 'Car Mode',
+                        _carMode ? 'Shake Mode' : 'Drive Mode',
                         style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white),
                       ),
                     ],
-                  ),
-                ),
-              ),
-
-              const SizedBox(height: 12),
-
-              // Pause/Listen toggle
-              GestureDetector(
-                onTap: () {
-                  setState(() => _enabled = !_enabled);
-                  HapticFeedback.mediumImpact();
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
-                  decoration: BoxDecoration(
-                    color: _enabled ? Colors.purple : Colors.white.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(30),
-                  ),
-                  child: Text(
-                    _enabled ? (_carMode ? 'Driving...' : 'Listening...') : 'Paused',
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
                   ),
                 ),
               ),

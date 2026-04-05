@@ -16,7 +16,7 @@ cd /Users/predator/moan/ios && FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD="buj
 ```
 
 Note: fastlane only handles upload because CocoaPods breaks under fastlane's Ruby environment.
-Current build number: 3
+Current build number: 4
 
 Apple ID: ahto.altmets@gmail.com
 Team ID: WZK4HS38QW
