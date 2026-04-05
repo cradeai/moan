@@ -86,7 +86,10 @@ class _MoanPageState extends State<MoanPage> {
   StreamSubscription? _subscription;
   StreamSubscription<Position>? _positionSub;
   Timer? _decayTimer;
-  final AudioPlayer _player = AudioPlayer();
+  final AudioPlayer _lightPlayer = AudioPlayer();
+  final AudioPlayer _mediumPlayer = AudioPlayer();
+  final AudioPlayer _intensePlayer = AudioPlayer();
+  bool _playersStarted = false;
 
   bool _enabled = true;
   bool _carMode = false;
@@ -110,7 +113,13 @@ class _MoanPageState extends State<MoanPage> {
     _startLoop();
     _startListening();
     _decayTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-      if (_score > 0 && !_carMode) {
+      if (_testMode && _score > 0) {
+        // Slow decay for test slider (~15 sec full fade)
+        setState(() {
+          _score = (_score - 6.67 * 0.05).clamp(0.0, _maxScoreLimit);
+          if (_score == 0) _testMode = false;
+        });
+      } else if (_score > 0) {
         setState(() {
           _score = (_score - _decayRate * 0.05).clamp(0.0, _maxScoreLimit);
         });
@@ -119,64 +128,102 @@ class _MoanPageState extends State<MoanPage> {
   }
 
   Timer? _audioTimer;
-  bool _isPlayingMoan = false;
-  double _peakScore = 0;
-  double _currentVolume = 0;
+
+  double _lastLightVol = -1;
+  double _lastMediumVol = -1;
+  double _lastIntenseVol = -1;
 
   Future<void> _startLoop() async {
-    await _player.setReleaseMode(ReleaseMode.stop);
+    print('[AUDIO] _startLoop begin');
+    try {
+      await AudioPlayer.global.setAudioContext(AudioContext(
+        iOS: AudioContextIOS(
+          category: AVAudioSessionCategory.playback,
+          options: const {AVAudioSessionOptions.mixWithOthers},
+        ),
+        android: AudioContextAndroid(
+          contentType: AndroidContentType.music,
+          usageType: AndroidUsageType.media,
+        ),
+      ));
+      print('[AUDIO] context set');
 
-    _player.onPlayerComplete.listen((_) {
-      _isPlayingMoan = false;
-      _currentVolume = 0;
-      print('[COMPLETE] file ended');
-    });
+      await _lightPlayer.setReleaseMode(ReleaseMode.loop);
+      await _mediumPlayer.setReleaseMode(ReleaseMode.loop);
+      await _intensePlayer.setReleaseMode(ReleaseMode.loop);
+      print('[AUDIO] release modes set');
 
-    // Fade out manager — only touches volume, never triggers play
-    _audioTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
-      if (!_isPlayingMoan) return;
+      await _lightPlayer.play(AssetSource('audio/light_loop.mp3'), volume: 0);
+      print('[AUDIO] light playing');
+      await _mediumPlayer.play(AssetSource('audio/medium_loop.mp3'), volume: 0);
+      print('[AUDIO] medium playing');
+      await _intensePlayer.play(AssetSource('audio/intense_loop.mp3'), volume: 0);
+      print('[AUDIO] intense playing');
 
-      final msSinceTrigger = DateTime.now().difference(_triggerTime).inMilliseconds;
-      final shouldFade = _score < _peakScore - 2 || msSinceTrigger > _fadeAfterMs;
+      _playersStarted = true;
+      print('[AUDIO] all 3 loops started');
+    } catch (e, st) {
+      print('[AUDIO ERROR] $e\n$st');
+    }
 
-      if (_score > _peakScore) {
-        // Score still rising → update peak, reset timer, keep full volume
-        _peakScore = _score;
-        _triggerTime = DateTime.now();
-        final factor = (_score / _maxScoreLimit).clamp(0.0, 1.0);
-        _currentVolume = (0.3 + factor * 0.7).clamp(0.3, 1.0);
-        _player.setVolume(_currentVolume);
-        print('[RISE] score=${_score.toStringAsFixed(1)} peak=${_peakScore.toStringAsFixed(1)} vol=${_currentVolume.toStringAsFixed(2)}');
-      } else if (shouldFade) {
-        // Score dropping or no rise for 3s → fade out
-        _currentVolume = (_currentVolume * 0.97);
-        if (_currentVolume < 0.005) {
-          _currentVolume = 0;
-          _player.stop();
-          _isPlayingMoan = false;
-          print('[STOP] fade out complete');
-        } else {
-          _player.setVolume(_currentVolume);
-          print('[FADE] score=${_score.toStringAsFixed(1)} peak=${_peakScore.toStringAsFixed(1)} vol=${_currentVolume.toStringAsFixed(3)}');
-        }
-      }
+    // Continuous crossfade based on score (100ms = 10x/sec, smooth enough)
+    _audioTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      _updateCrossfade();
     });
   }
 
-  DateTime _triggerTime = DateTime.now();
-  static const int _fadeAfterMs = 3000; // start fade 3s after trigger if no new rise
+  void _updateCrossfade() {
+    final score = _score;
 
-  void _triggerMoan(double factor) {
-    if (_isPlayingMoan) return;
-    final rate = 0.5 + factor * 1.5;
-    _currentVolume = (0.3 + factor * 0.7).clamp(0.3, 1.0);
-    _peakScore = _score;
-    _triggerTime = DateTime.now();
-    _isPlayingMoan = true;
-    _player.setPlaybackRate(rate);
-    _player.setVolume(_currentVolume);
-    _player.play(AssetSource('audio/moan.mp3'));
-    print('[TRIGGER] score=${_score.toStringAsFixed(1)} factor=${factor.toStringAsFixed(2)} rate=${rate.toStringAsFixed(2)} vol=${_currentVolume.toStringAsFixed(2)}');
+    // Compute volume for each band with overlapping triangular fades
+    // Light:   peaks at score 15, fades out by 50
+    // Medium:  peaks at score 50, 0 outside 15-85
+    // Intense: peaks at score 85, fades in from 50
+    double lightVol = 0;
+    double mediumVol = 0;
+    double intenseVol = 0;
+
+    if (score > 0) {
+      // Light band (0-50)
+      if (score <= 15) {
+        lightVol = score / 15; // rising 0→1
+      } else if (score <= 50) {
+        lightVol = 1 - (score - 15) / 35; // falling 1→0
+      }
+      // Medium band (15-85)
+      if (score > 15 && score <= 50) {
+        mediumVol = (score - 15) / 35; // rising 0→1
+      } else if (score > 50 && score < 85) {
+        mediumVol = 1 - (score - 50) / 35; // falling 1→0
+      }
+      // Intense band (50-100)
+      if (score > 50 && score <= 85) {
+        intenseVol = (score - 50) / 35; // rising 0→1
+      } else if (score > 85) {
+        intenseVol = 1;
+      }
+    }
+
+    // Master volume scales quadratically for bigger contrast low vs high
+    final normalized = (score / 100).clamp(0.0, 1.0);
+    final master = score <= 0 ? 0.0 : (0.05 + normalized * normalized * 0.95).clamp(0.0, 1.0);
+    lightVol *= master;
+    mediumVol *= master;
+    intenseVol *= master;
+
+    // Only update volume if changed meaningfully (reduces audio session churn)
+    if ((lightVol - _lastLightVol).abs() > 0.02) {
+      _lightPlayer.setVolume(lightVol).catchError((e) => print('[VOL ERR light] $e'));
+      _lastLightVol = lightVol;
+    }
+    if ((mediumVol - _lastMediumVol).abs() > 0.02) {
+      _mediumPlayer.setVolume(mediumVol).catchError((e) => print('[VOL ERR medium] $e'));
+      _lastMediumVol = mediumVol;
+    }
+    if ((intenseVol - _lastIntenseVol).abs() > 0.02) {
+      _intensePlayer.setVolume(intenseVol).catchError((e) => print('[VOL ERR intense] $e'));
+      _lastIntenseVol = intenseVol;
+    }
   }
 
   @override
@@ -185,7 +232,9 @@ class _MoanPageState extends State<MoanPage> {
     _positionSub?.cancel();
     _decayTimer?.cancel();
     _audioTimer?.cancel();
-    _player.dispose();
+    _lightPlayer.dispose();
+    _mediumPlayer.dispose();
+    _intensePlayer.dispose();
     super.dispose();
   }
 
@@ -226,6 +275,8 @@ class _MoanPageState extends State<MoanPage> {
 
       _subscription?.cancel();
       _lastPosition = null;
+      _lastSpeedForAccel = 0;
+      _lastAccelTime = DateTime.now();
 
       _positionSub = Geolocator.getPositionStream(
         locationSettings: AppleSettings(
@@ -256,6 +307,11 @@ class _MoanPageState extends State<MoanPage> {
   Position? _lastPosition;
   double _minSpeedSinceLastTrigger = 0;
   DateTime _minSpeedTime = DateTime.now();
+  bool _testMode = false;
+  double _lastSpeedForAccel = 0;
+  DateTime _lastAccelTime = DateTime.now();
+  double _testSpeed = 0;
+  DateTime _lastTestSpeedTime = DateTime.now();
   static const double _speedJumpThreshold = 20.0; // km/h
   static const int _jumpWindowMs = 3000; // must happen within 3 sec
 
@@ -300,20 +356,30 @@ class _MoanPageState extends State<MoanPage> {
 
     // Check for 20 km/h jump within 3 sec window
     final jump = smoothed - _minSpeedSinceLastTrigger;
-    if (jump >= _speedJumpThreshold && !_isPlayingMoan) {
+    if (jump >= _speedJumpThreshold) {
       _minSpeedSinceLastTrigger = smoothed;
       _minSpeedTime = DateTime.now();
-      // Intensity based on how fast we're going now
-      final factor = (smoothed / 150.0).clamp(0.0, 1.0);
-      _triggerMoan(factor);
     }
+
+    // Compute acceleration (km/h per second) and add to score
+    final now = DateTime.now();
+    final dt = now.difference(_lastAccelTime).inMilliseconds / 1000.0;
+    double accel = 0;
+    if (dt > 0.2 && dt < 5) {
+      accel = (smoothed - _lastSpeedForAccel) / dt;
+    }
+    _lastSpeedForAccel = smoothed;
+    _lastAccelTime = now;
 
     setState(() {
       _currentSpeed = smoothed;
       _currentForce = smoothed;
-      _score = smoothed.clamp(0.0, _maxScoreLimit);
-      if (_score > _maxScore) _maxScore = _score;
-      _gpsDebug = 'GPS #$_gpsUpdates | ${speedKmh.toStringAsFixed(0)} km/h | jump: ${jump.toStringAsFixed(0)}';
+      if (!_testMode && accel > 3) {
+        final points = (accel - 3) * (accel - 3) * 0.6;
+        _score = (_score + points).clamp(0.0, _maxScoreLimit);
+        if (_score > _maxScore) _maxScore = _score;
+      }
+      _gpsDebug = 'GPS #$_gpsUpdates | ${speedKmh.toStringAsFixed(0)} km/h | accel: ${accel.toStringAsFixed(1)}';
     });
   }
 
@@ -331,10 +397,6 @@ class _MoanPageState extends State<MoanPage> {
         if (_score > _maxScore) _maxScore = _score;
         _flash = true;
       });
-
-      // Trigger immediately on shake
-      final factor = (_score / _maxScoreLimit).clamp(0.0, 1.0);
-      _triggerMoan(factor);
 
       Future.delayed(const Duration(milliseconds: 150), () {
         if (mounted) setState(() => _flash = false);
@@ -370,18 +432,21 @@ class _MoanPageState extends State<MoanPage> {
         child: SafeArea(
           child: Column(
             children: [
-              Stack(
-                alignment: Alignment.center,
-                children: [
-                  const Text('😩', style: TextStyle(fontSize: 50)),
-                  Positioned(
-                    right: 8,
-                    child: IconButton(
-                      icon: Icon(Icons.logout, color: Colors.white.withValues(alpha: 0.4), size: 20),
-                      onPressed: () => Supabase.instance.client.auth.signOut(),
+              SizedBox(
+                width: double.infinity,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    const Text('😩', style: TextStyle(fontSize: 50)),
+                    Positioned(
+                      right: 8,
+                      child: IconButton(
+                        icon: Icon(Icons.logout, color: Colors.white.withValues(alpha: 0.4), size: 20),
+                        onPressed: () => Supabase.instance.client.auth.signOut(),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
               const SizedBox(height: 4),
               const Text('Moan', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white)),
@@ -500,17 +565,38 @@ class _MoanPageState extends State<MoanPage> {
                 padding: const EdgeInsets.symmetric(horizontal: 40),
                 child: Column(
                   children: [
-                    Text('Test Score', style: TextStyle(fontSize: 13, color: Colors.orange.withValues(alpha: 0.5))),
+                    Text(_carMode ? 'Test Speed (km/h)' : 'Test Score',
+                        style: TextStyle(fontSize: 13, color: Colors.orange.withValues(alpha: 0.5))),
                     Slider(
-                      value: _score, min: 0, max: 100,
+                      value: _carMode ? _testSpeed : _score,
+                      min: 0,
+                      max: _carMode ? 150 : 100,
                       activeColor: Colors.orange,
                       inactiveColor: Colors.white.withValues(alpha: 0.1),
                       onChanged: (v) {
-                        final oldScore = _score;
-                        setState(() => _score = v);
-                        if (v > oldScore + 5) {
-                          final factor = (v / _maxScoreLimit).clamp(0.0, 1.0);
-                          _triggerMoan(factor);
+                        if (_carMode) {
+                          // Simulate speed change → compute acceleration → add to score
+                          final now = DateTime.now();
+                          final dt = now.difference(_lastTestSpeedTime).inMilliseconds / 1000.0;
+                          if (dt > 0.05) {
+                            final accel = (v - _testSpeed) / dt;
+                            setState(() {
+                              _testSpeed = v;
+                              _currentSpeed = v;
+                              _lastTestSpeedTime = now;
+                              _testMode = true;
+                              if (accel > 3) {
+                                final points = (accel - 3) * (accel - 3) * 0.6;
+                                _score = (_score + points).clamp(0.0, _maxScoreLimit);
+                                if (_score > _maxScore) _maxScore = _score;
+                              }
+                            });
+                          }
+                        } else {
+                          setState(() {
+                            _score = v;
+                            _testMode = true;
+                          });
                         }
                       },
                     ),

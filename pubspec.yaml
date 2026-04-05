@@ -62,8 +62,8 @@ flutter:
   # the material Icons class.
   uses-material-design: true
   assets:
+    - assets/audio/
     - assets/audio/moan/
-    - assets/audio/moan.mp3
     - assets/images/
   #   - images/a_dot_ham.jpeg
 
