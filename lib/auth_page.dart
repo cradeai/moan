@@ -32,6 +32,12 @@ class _AuthPageState extends State<AuthPage> {
       return;
     }
 
+    final emailRegex = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]{2,}$');
+    if (!emailRegex.hasMatch(email)) {
+      _showError('Enter a valid email');
+      return;
+    }
+
     setState(() => _loading = true);
 
     try {

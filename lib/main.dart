@@ -97,14 +97,14 @@ class _MoanPageState extends State<MoanPage> {
   String _gpsDebug = '';
   double _currentForce = 0;
   double _currentSpeed = 0; // km/h
-  double _sensitivity = 3.0;
+  double _sensitivity = 5.0;
   bool _flash = false;
 
   // Score system
   double _score = 0;
   double _maxScore = 0;
   static const double _maxScoreLimit = 100.0;
-  static const double _decayRate = 8.0; // points per second decay
+  static const double _decayRate = 15.0; // points per second decay
 
 
   @override
@@ -389,7 +389,7 @@ class _MoanPageState extends State<MoanPage> {
     if (!_enabled) return;
 
     if (impact > _sensitivity) {
-      final points = (impact / 3.0).clamp(1.0, 15.0);
+      final points = (impact / 10.0).clamp(0.5, 5.0);
       setState(() {
         _score = (_score + points).clamp(0.0, _maxScoreLimit);
         if (_score > _maxScore) _maxScore = _score;
@@ -573,7 +573,7 @@ class _MoanPageState extends State<MoanPage> {
                       Icon(_carMode ? Icons.vibration : Icons.directions_car, color: Colors.white, size: 18),
                       const SizedBox(width: 8),
                       Text(
-                        _carMode ? 'Shake Mode' : 'Drive Mode',
+                        _carMode ? 'Switch to Shake Mode' : 'Switch to Drive Mode',
                         style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white),
                       ),
                     ],
