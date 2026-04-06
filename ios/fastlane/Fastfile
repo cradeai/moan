@@ -4,7 +4,7 @@ platform :ios do
   desc "Upload pre-built IPA to TestFlight"
   lane :beta do
     upload_to_testflight(
-      ipa: "../build/ios/ipa/moan.ipa",
+      ipa: "../build/ios/ipa/Moaner.ipa",
       skip_waiting_for_build_processing: true,
       skip_submission: true,
     )

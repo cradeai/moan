@@ -33,7 +33,7 @@ class MoanApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Moan',
+      title: 'Moaner',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(scaffoldBackgroundColor: Colors.black),
       home: const AuthGate(),
@@ -447,7 +447,7 @@ class _MoanPageState extends State<MoanPage> {
                 ),
               ),
               const SizedBox(height: 4),
-              const Text('Moan', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white)),
+              const Text('Moaner', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white)),
               Text(_carMode ? 'Drive faster...' : 'Shake or slap your phone',
                   style: TextStyle(fontSize: 14, color: Colors.white.withValues(alpha: 0.5))),
 
