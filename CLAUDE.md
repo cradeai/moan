@@ -12,11 +12,11 @@ Two steps to build and upload:
 cd /Users/predator/moan && flutter build ipa --release --build-number=<next_number>
 
 # 2. Upload to TestFlight
-cd /Users/predator/moan/ios && FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD="bujn-waty-wgnm-vhte" fastlane beta
+cd /Users/predator/moan/ios && FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD=$(grep FASTLANE .env.local | cut -d= -f2) fastlane beta
 ```
 
 Note: fastlane only handles upload because CocoaPods breaks under fastlane's Ruby environment.
-Current build number: 6
+Current build number: 7
 
 Apple ID: ahto.altmets@gmail.com
 Team ID: WZK4HS38QW
