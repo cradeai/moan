@@ -115,7 +115,7 @@ class _AuthPageState extends State<AuthPage> {
                 const Text('😩', style: TextStyle(fontSize: 60)),
                 const SizedBox(height: 8),
                 const Text(
-                  'Moan',
+                  'Moaner',
                   style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white),
                 ),
                 const SizedBox(height: 40),

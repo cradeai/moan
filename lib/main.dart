@@ -527,11 +527,11 @@ class _MoanPageState extends State<MoanPage> {
 
               // Force circle
               Container(
-                width: 160, height: 160,
+                width: 220, height: 220,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: Color.lerp(Colors.white.withValues(alpha: 0.15), _scoreColor(), scorePct)!,
+                    color: Color.lerp(Colors.white, _scoreColor(), scorePct)!,
                     width: 2 + scorePct * 3,
                   ),
                 ),
@@ -541,9 +541,9 @@ class _MoanPageState extends State<MoanPage> {
                     children: [
                       Text(
                           _carMode ? _currentSpeed.toInt().toString() : _currentForce.toStringAsFixed(1),
-                          style: TextStyle(fontSize: 40, fontWeight: FontWeight.w200,
-                              color: Color.lerp(Colors.white.withValues(alpha: 0.4), _scoreColor(), scorePct))),
-                      Text(_carMode ? 'km/h' : 'm/s²', style: TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.3))),
+                          style: TextStyle(fontSize: 56, fontWeight: FontWeight.w200,
+                              color: Color.lerp(Colors.white, _scoreColor(), scorePct))),
+                      Text(_carMode ? 'km/h' : 'm/s²', style: TextStyle(fontSize: 18, color: Colors.white)),
                     ],
                   ),
                 ),
