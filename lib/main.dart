@@ -104,7 +104,8 @@ class _MoanPageState extends State<MoanPage> {
   double _score = 0;
   double _maxScore = 0;
   static const double _maxScoreLimit = 100.0;
-  static const double _decayRate = 15.0; // points per second decay
+  static const double _decayRate = 15.0; // points per second decay (shake)
+  static const double _carDecayRate = 5.0; // points per second decay (drive)
 
 
   @override
@@ -115,7 +116,8 @@ class _MoanPageState extends State<MoanPage> {
     _decayTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
       if (_score > 0) {
         setState(() {
-          _score = (_score - _decayRate * 0.05).clamp(0.0, _maxScoreLimit);
+          final decay = _carMode ? _carDecayRate : _decayRate;
+          _score = (_score - decay * 0.05).clamp(0.0, _maxScoreLimit);
         });
       }
     });
@@ -366,7 +368,7 @@ class _MoanPageState extends State<MoanPage> {
       _currentSpeed = smoothed;
       _currentForce = smoothed;
       if (accel > 3) {
-        final points = (accel - 3) * (accel - 3) * 0.6;
+        final points = (accel - 3) * (accel - 3) * 1.0;
         _score = (_score + points).clamp(0.0, _maxScoreLimit);
         if (_score > _maxScore) _maxScore = _score;
         _flash = true;
