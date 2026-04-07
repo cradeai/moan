@@ -2,6 +2,7 @@
 .env*
 *.jks
 key.properties
+google-play-key.json
 
 # Miscellaneous
 *.class
