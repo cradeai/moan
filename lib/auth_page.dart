@@ -1,5 +1,9 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:crypto/crypto.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 class AuthPage extends StatefulWidget {
@@ -15,6 +19,7 @@ class _AuthPageState extends State<AuthPage> {
   bool _isLogin = true;
   bool _loading = false;
   bool _googleLoading = false;
+  bool _appleLoading = false;
 
   @override
   void dispose() {
@@ -64,16 +69,65 @@ class _AuthPageState extends State<AuthPage> {
     }
   }
 
+  Future<void> _signInWithApple() async {
+    setState(() => _appleLoading = true);
+    try {
+      final rawNonce = Supabase.instance.client.auth.generateRawNonce();
+      final hashedNonce = sha256.convert(utf8.encode(rawNonce)).toString();
+
+      final credential = await SignInWithApple.getAppleIDCredential(
+        scopes: [
+          AppleIDAuthorizationScopes.email,
+          AppleIDAuthorizationScopes.fullName,
+        ],
+        nonce: hashedNonce,
+      );
+
+      final idToken = credential.identityToken;
+      if (idToken == null) {
+        if (mounted) _showError('Apple sign in failed');
+        return;
+      }
+
+      await Supabase.instance.client.auth.signInWithIdToken(
+        provider: OAuthProvider.apple,
+        idToken: idToken,
+        nonce: rawNonce,
+      );
+    } on SignInWithAppleAuthorizationException catch (e) {
+      if (e.code != AuthorizationErrorCode.canceled && mounted) {
+        _showError('Apple sign in failed');
+      }
+    } catch (e) {
+      if (mounted) _showError('Apple sign in failed');
+    } finally {
+      if (mounted) setState(() => _appleLoading = false);
+    }
+  }
+
   Future<void> _signInWithGoogle() async {
     setState(() => _googleLoading = true);
     try {
-      final success = await Supabase.instance.client.auth.signInWithOAuth(
-        OAuthProvider.google,
-        redirectTo: 'io.supabase.moan://login-callback/',
-        authScreenLaunchMode: LaunchMode.externalApplication,
+      await GoogleSignIn.instance.initialize(
+        clientId: '937773053973-rlrcr4637malhpc298m0gq406prnttns.apps.googleusercontent.com',
+        serverClientId: '937773053973-i7q8cvt3l5ui90edfh0vavbc6t0q39a6.apps.googleusercontent.com',
       );
-      if (!success && mounted) {
-        _showError('Could not open Google sign in');
+
+      final googleUser = await GoogleSignIn.instance.authenticate();
+      final idToken = googleUser.authentication.idToken;
+
+      if (idToken == null) {
+        if (mounted) _showError('Google sign in failed');
+        return;
+      }
+
+      await Supabase.instance.client.auth.signInWithIdToken(
+        provider: OAuthProvider.google,
+        idToken: idToken,
+      );
+    } on GoogleSignInException catch (e) {
+      if (e.code != GoogleSignInExceptionCode.canceled && mounted) {
+        _showError('Google sign in failed');
       }
     } catch (e) {
       if (mounted) _showError('Google sign in failed');
@@ -198,6 +252,32 @@ class _AuthPageState extends State<AuthPage> {
                 ),
 
                 const SizedBox(height: 20),
+
+                if (Theme.of(context).platform == TargetPlatform.iOS) ...[
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: OutlinedButton.icon(
+                      onPressed: _appleLoading ? null : _signInWithApple,
+                      icon: _appleLoading
+                          ? const SizedBox(
+                              width: 20, height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                            )
+                          : const Icon(Icons.apple, color: Colors.white, size: 24),
+                      label: const Text(
+                        'Continue with Apple',
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: Colors.white),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(color: Colors.white.withValues(alpha: 0.2)),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 12),
+                ],
 
                 SizedBox(
                   width: double.infinity,

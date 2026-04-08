@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -97,7 +98,8 @@ class _MoanPageState extends State<MoanPage> {
   String _gpsDebug = '';
   double _currentForce = 0;
   double _currentSpeed = 0; // km/h
-  double _sensitivity = 5.0;
+  final bool _isIpad = Platform.isIOS && WidgetsBinding.instance.platformDispatcher.views.first.physicalSize.shortestSide / WidgetsBinding.instance.platformDispatcher.views.first.devicePixelRatio > 600;
+  double get _sensitivity => _isIpad ? 2.5 : 5.0;
   bool _flash = false;
 
   // Score system
@@ -360,9 +362,9 @@ class _MoanPageState extends State<MoanPage> {
     double accel = 0;
     if (dt > 0.2 && dt < 5) {
       accel = (smoothed - _lastSpeedForAccel) / dt;
+      _lastSpeedForAccel = smoothed;
+      _lastAccelTime = now;
     }
-    _lastSpeedForAccel = smoothed;
-    _lastAccelTime = now;
 
     setState(() {
       _currentSpeed = smoothed;
@@ -438,6 +440,15 @@ class _MoanPageState extends State<MoanPage> {
                   alignment: Alignment.center,
                   children: [
                     const Text('😩', style: TextStyle(fontSize: 50)),
+                    Positioned(
+                      left: 8,
+                      child: IconButton(
+                        icon: Icon(Icons.settings, color: Colors.white.withValues(alpha: 0.4), size: 20),
+                        onPressed: () => Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const SettingsPage()),
+                        ),
+                      ),
+                    ),
                     Positioned(
                       right: 8,
                       child: IconButton(
@@ -586,6 +597,88 @@ class _MoanPageState extends State<MoanPage> {
               const SizedBox(height: 30),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class SettingsPage extends StatelessWidget {
+  const SettingsPage({super.key});
+
+  Future<void> _deleteAccount(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.grey.shade900,
+        title: const Text('Delete Account', style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'This will permanently delete your account and all associated data. This action cannot be undone.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !context.mounted) return;
+
+    try {
+      await Supabase.instance.client.rpc('delete_user');
+      await Supabase.instance.client.auth.signOut();
+      if (context.mounted) {
+        Navigator.of(context).popUntil((route) => route.isFirst);
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to delete account'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final email = Supabase.instance.client.auth.currentUser?.email ?? '';
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Settings'),
+        backgroundColor: Colors.black,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Signed in as', style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 14)),
+            const SizedBox(height: 4),
+            Text(email, style: const TextStyle(color: Colors.white, fontSize: 16)),
+            const Spacer(),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                onPressed: () => _deleteAccount(context),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red.shade900,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: const Text('Delete Account', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              ),
+            ),
+            const SizedBox(height: 40),
+          ],
         ),
       ),
     );
