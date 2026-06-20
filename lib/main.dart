@@ -7,17 +7,24 @@ import 'package:sensors_plus/sensors_plus.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'auth_page.dart';
+import 'package:uuid/uuid.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
+import 'leaderboard.dart';
+import 'leaderboard_page.dart';
+import 'trip.dart';
+import 'trip_summary_page.dart';
+import 'trip_history_page.dart';
+import 'onboarding_page.dart';
+import 'safety_dialog.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Supabase.initialize(
     url: 'https://pimbnbqmdnyhzjndwhmr.supabase.co',
     anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBpbWJuYnFtZG55aHpqbmR3aG1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUxMjEwODEsImV4cCI6MjA5MDY5NzA4MX0.Gjr0JCa9EjqyctFSs1mH2SCXtnGJZCEglduxAZI35QY',
-    authOptions: const FlutterAuthClientOptions(
-      authFlowType: AuthFlowType.pkce,
-    ),
   );
+  await Leaderboard.init();
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
@@ -37,42 +44,44 @@ class MoanApp extends StatelessWidget {
       title: 'Moaner',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(scaffoldBackgroundColor: Colors.black),
-      home: const AuthGate(),
+      home: const RootGate(),
     );
   }
 }
 
-class AuthGate extends StatefulWidget {
-  const AuthGate({super.key});
+class RootGate extends StatefulWidget {
+  const RootGate({super.key});
 
   @override
-  State<AuthGate> createState() => _AuthGateState();
+  State<RootGate> createState() => _RootGateState();
 }
 
-class _AuthGateState extends State<AuthGate> {
-  late final StreamSubscription<AuthState> _authSub;
+class _RootGateState extends State<RootGate> {
+  bool? _onboardingDone;
 
   @override
   void initState() {
     super.initState();
-    _authSub = Supabase.instance.client.auth.onAuthStateChange.listen((_) {
-      if (mounted) setState(() {});
-    });
+    _check();
   }
 
-  @override
-  void dispose() {
-    _authSub.cancel();
-    super.dispose();
+  Future<void> _check() async {
+    final done = await OnboardingPage.hasCompleted();
+    if (mounted) setState(() => _onboardingDone = done);
   }
 
   @override
   Widget build(BuildContext context) {
-    final session = Supabase.instance.client.auth.currentSession;
-    if (session != null) {
-      return const MoanPage();
+    if (_onboardingDone == null) {
+      return const Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(child: CircularProgressIndicator(color: Colors.purple)),
+      );
     }
-    return const AuthPage();
+    if (!_onboardingDone!) {
+      return OnboardingPage(onComplete: () => setState(() => _onboardingDone = true));
+    }
+    return const MoanPage();
   }
 }
 
@@ -93,28 +102,38 @@ class _MoanPageState extends State<MoanPage> {
   bool _playersStarted = false;
 
   bool _enabled = true;
-  bool _carMode = false;
+  bool _carMode = true;
   int _gpsUpdates = 0;
   String _gpsDebug = '';
   double _currentForce = 0;
   double _currentSpeed = 0; // km/h
   final bool _isIpad = Platform.isIOS && WidgetsBinding.instance.platformDispatcher.views.first.physicalSize.shortestSide / WidgetsBinding.instance.platformDispatcher.views.first.devicePixelRatio > 600;
-  double get _sensitivity => _isIpad ? 2.5 : 5.0;
+  double get _sensitivity => _isIpad ? 4.5 : 8.0;
   bool _flash = false;
 
   // Score system
   double _score = 0;
   double _maxScore = 0;
   static const double _maxScoreLimit = 100.0;
-  static const double _decayRate = 15.0; // points per second decay (shake)
+  static const double _decayRate = 8.0; // points per second decay (shake)
   static const double _carDecayRate = 5.0; // points per second decay (drive)
+  static const int _shakeCooldownMs = 200;
+  DateTime _lastShakeTime = DateTime.fromMillisecondsSinceEpoch(0);
+
+  TripBuilder? _tripBuilder;
+  final List<LatLng> _liveRoute = [];
+  LatLng? _liveCenter;
+  final MapController _mapController = MapController();
+  double _smoothedHeading = 0;
+  bool _hasHeading = false;
+  static const double _rotationMinSpeedKmh = 8.0;
 
 
   @override
   void initState() {
     super.initState();
     _startLoop();
-    _startListening();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _initPrimaryMode());
     _decayTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
       if (_score > 0) {
         setState(() {
@@ -123,6 +142,30 @@ class _MoanPageState extends State<MoanPage> {
         });
       }
     });
+  }
+
+  Future<void> _initPrimaryMode() async {
+    final ok = await _enableDriveMode(showErrors: false);
+    if (!ok) await _enableShakeMode(saveTrip: false);
+  }
+
+  Future<void> _openLeaderboard() async {
+    if (!Leaderboard.hasDisplayName) {
+      final name = await showDisplayNameDialog(context);
+      if (name == null || name.isEmpty) return;
+      await Leaderboard.setDisplayName(name);
+      if (_maxScore > 0) {
+        await Leaderboard.submitScore(
+          score: _maxScore.toInt(),
+          mode: _carMode ? 'drive' : 'shake',
+        );
+      }
+    }
+    if (mounted) {
+      Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const LeaderboardPage()),
+      );
+    }
   }
 
   Timer? _audioTimer;
@@ -209,16 +252,18 @@ class _MoanPageState extends State<MoanPage> {
     mediumVol *= master;
     intenseVol *= master;
 
-    // Only update volume if changed meaningfully (reduces audio session churn)
-    if ((lightVol - _lastLightVol).abs() > 0.02) {
+    // Only update volume if changed meaningfully (reduces audio session churn).
+    // Always force-update when target is exactly 0 so sound fully stops.
+    final isSilent = score <= 0;
+    if (isSilent || (lightVol - _lastLightVol).abs() > 0.02) {
       _lightPlayer.setVolume(lightVol).catchError((e) => print('[VOL ERR light] $e'));
       _lastLightVol = lightVol;
     }
-    if ((mediumVol - _lastMediumVol).abs() > 0.02) {
+    if (isSilent || (mediumVol - _lastMediumVol).abs() > 0.02) {
       _mediumPlayer.setVolume(mediumVol).catchError((e) => print('[VOL ERR medium] $e'));
       _lastMediumVol = mediumVol;
     }
-    if ((intenseVol - _lastIntenseVol).abs() > 0.02) {
+    if (isSilent || (intenseVol - _lastIntenseVol).abs() > 0.02) {
       _intensePlayer.setVolume(intenseVol).catchError((e) => print('[VOL ERR intense] $e'));
       _lastIntenseVol = intenseVol;
     }
@@ -243,62 +288,102 @@ class _MoanPageState extends State<MoanPage> {
     ).listen(_onMotion);
   }
 
-  Future<void> _toggleCarMode() async {
-    if (!_carMode) {
-      // Check if location services are enabled
-      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Turn on Location Services'), backgroundColor: Colors.red),
-          );
-        }
-        return;
+  Future<bool> _enableDriveMode({bool showErrors = true}) async {
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      if (showErrors && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Turn on Location Services'), backgroundColor: Colors.red),
+        );
       }
+      return false;
+    }
 
-      // Check permission
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    final granted = permission == LocationPermission.whileInUse ||
+        permission == LocationPermission.always;
+    if (!granted) {
+      if (showErrors && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Location permission required'), backgroundColor: Colors.red),
+        );
       }
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Location permission required'), backgroundColor: Colors.red),
-          );
-        }
-        return;
-      }
+      return false;
+    }
 
-      _subscription?.cancel();
-      _lastPosition = null;
-      _lastSpeedForAccel = 0;
-      _lastAccelTime = DateTime.now();
+    _subscription?.cancel();
+    _lastPosition = null;
+    _lastSpeedForAccel = 0;
+    _lastAccelTime = DateTime.now();
 
-      _positionSub = Geolocator.getPositionStream(
-        locationSettings: AppleSettings(
-          accuracy: LocationAccuracy.bestForNavigation,
-          distanceFilter: 0,
-          activityType: ActivityType.automotiveNavigation,
-          allowBackgroundLocationUpdates: false,
-        ),
-      ).listen(_onPosition);
+    _positionSub = Geolocator.getPositionStream(
+      locationSettings: AppleSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0,
+        activityType: ActivityType.automotiveNavigation,
+        allowBackgroundLocationUpdates: false,
+      ),
+    ).listen(
+      _onPosition,
+      onError: (e) {
+        if (!mounted) return;
+        _enableShakeMode(saveTrip: false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Location unavailable, switched to Shake Mode'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      },
+    );
 
-      _minSpeedSinceLastTrigger = 0;
+    _minSpeedSinceLastTrigger = 0;
+    _tripBuilder = TripBuilder(
+      id: const Uuid().v4(),
+      startedAt: DateTime.now(),
+    );
+    _liveRoute.clear();
+    _liveCenter = null;
 
+    if (mounted) {
       setState(() {
         _carMode = true;
         _gpsUpdates = 0;
       });
+    }
+    return true;
+  }
+
+  Future<void> _enableShakeMode({bool saveTrip = true}) async {
+    _positionSub?.cancel();
+    _lastPosition = null;
+    _currentSpeed = 0;
+    _score = 0;
+
+    final builder = _tripBuilder;
+    _tripBuilder = null;
+    if (saveTrip && builder != null && builder.hasPoints) {
+      final trip = builder.build();
+      final saved = await TripStore.save(trip);
+      if (saved && mounted) {
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => TripSummaryPage(trip: trip)),
+        );
+      }
+    }
+
+    _startListening();
+    if (mounted) setState(() => _carMode = false);
+  }
+
+  Future<void> _toggleCarMode() async {
+    if (!_carMode) {
+      await _enableDriveMode();
     } else {
-      // Disable car mode — loop keeps playing, shake takes over
-      _positionSub?.cancel();
-      _lastPosition = null;
-      _currentSpeed = 0;
-      _score = 0;
-      _startListening();
-      setState(() => _carMode = false);
+      await _enableShakeMode();
     }
   }
 
@@ -366,13 +451,51 @@ class _MoanPageState extends State<MoanPage> {
       _lastAccelTime = now;
     }
 
+    _tripBuilder?.addPoint(position.latitude, position.longitude, smoothed);
+
+    final newPoint = LatLng(position.latitude, position.longitude);
+    final shouldAddToRoute = _liveRoute.isEmpty ||
+        const Distance().as(LengthUnit.Meter, _liveRoute.last, newPoint) > 5;
+    if (shouldAddToRoute) {
+      _liveRoute.add(newPoint);
+      if (_liveRoute.length > 500) _liveRoute.removeAt(0);
+    }
+    _liveCenter = newPoint;
+
+    // Smooth heading + only rotate when moving fast enough.
+    if (smoothed >= _rotationMinSpeedKmh && position.heading >= 0) {
+      final h = position.heading;
+      if (!_hasHeading) {
+        _smoothedHeading = h;
+        _hasHeading = true;
+      } else {
+        // Shortest angular distance interpolation.
+        var delta = h - _smoothedHeading;
+        if (delta > 180) delta -= 360;
+        if (delta < -180) delta += 360;
+        _smoothedHeading = (_smoothedHeading + delta * 0.35) % 360;
+        if (_smoothedHeading < 0) _smoothedHeading += 360;
+      }
+    }
+
+    try {
+      _mapController.move(newPoint, _mapController.camera.zoom);
+      if (_hasHeading) {
+        _mapController.rotate(-_smoothedHeading);
+      }
+    } catch (_) {}
+
     setState(() {
       _currentSpeed = smoothed;
       _currentForce = smoothed;
       if (accel > 3) {
         final points = (accel - 3) * (accel - 3) * 1.0;
         _score = (_score + points).clamp(0.0, _maxScoreLimit);
-        if (_score > _maxScore) _maxScore = _score;
+        if (_score > _maxScore) {
+          _maxScore = _score;
+          Leaderboard.submitScore(score: _maxScore.toInt(), mode: 'drive');
+        }
+        _tripBuilder?.updateScore(_score.toInt());
         _flash = true;
       }
       _gpsDebug = 'GPS #$_gpsUpdates | ${speedKmh.toStringAsFixed(0)} km/h | accel: ${accel.toStringAsFixed(1)}';
@@ -393,10 +516,20 @@ class _MoanPageState extends State<MoanPage> {
     if (!_enabled) return;
 
     if (impact > _sensitivity) {
-      final points = (impact / 10.0).clamp(0.5, 5.0);
+      final now = DateTime.now();
+      if (now.difference(_lastShakeTime).inMilliseconds < _shakeCooldownMs) return;
+      _lastShakeTime = now;
+
+      final scoreFraction = _score / _maxScoreLimit;
+      final difficulty = (1.0 - scoreFraction * scoreFraction).clamp(0.4, 1.0);
+      final points = (impact / 10.0).clamp(0.5, 5.0) * difficulty;
+
       setState(() {
         _score = (_score + points).clamp(0.0, _maxScoreLimit);
-        if (_score > _maxScore) _maxScore = _score;
+        if (_score > _maxScore) {
+          _maxScore = _score;
+          Leaderboard.submitScore(score: _maxScore.toInt(), mode: 'shake');
+        }
         _flash = true;
       });
 
@@ -423,234 +556,299 @@ class _MoanPageState extends State<MoanPage> {
     return Colors.red.shade200;
   }
 
+  Widget _buildFullScreenMap() {
+    if (_liveCenter == null) {
+      return Container(
+        color: Colors.grey.shade900,
+        child: const Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.gps_not_fixed, color: Colors.white38, size: 48),
+              SizedBox(height: 12),
+              Text('Waiting for GPS...', style: TextStyle(color: Colors.white54, fontSize: 16)),
+            ],
+          ),
+        ),
+      );
+    }
+    return Stack(
+      children: [
+        FlutterMap(
+          mapController: _mapController,
+          options: MapOptions(
+            initialCenter: _liveCenter!,
+            initialZoom: 17,
+            interactionOptions: const InteractionOptions(
+              flags: InteractiveFlag.none,
+            ),
+          ),
+          children: [
+            TileLayer(
+              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              userAgentPackageName: 'com.moan.moan',
+            ),
+            if (_liveRoute.length > 1)
+              PolylineLayer(
+                polylines: [
+                  Polyline(
+                    points: _liveRoute,
+                    strokeWidth: 5,
+                    color: _scoreColor(),
+                  ),
+                ],
+              ),
+          ],
+        ),
+        // Fixed arrow marker centered on screen, always pointing up.
+        IgnorePointer(
+          child: Center(
+            child: Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.purpleAccent,
+                border: Border.all(color: Colors.white, width: 3),
+                boxShadow: [
+                  BoxShadow(color: Colors.purpleAccent.withValues(alpha: 0.5), blurRadius: 14),
+                ],
+              ),
+              child: const Icon(Icons.navigation, color: Colors.white, size: 24),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final scorePct = (_score / _maxScoreLimit).clamp(0.0, 1.0);
 
     return Scaffold(
-      body: AnimatedContainer(
-        duration: const Duration(milliseconds: 100),
-        color: _flash ? _scoreColor().withValues(alpha: 0.3) : Colors.black,
-        child: SafeArea(
-          child: Column(
-            children: [
-              SizedBox(
-                width: double.infinity,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    const Text('😩', style: TextStyle(fontSize: 50)),
-                    Positioned(
-                      left: 8,
-                      child: IconButton(
-                        icon: Icon(Icons.settings, color: Colors.white.withValues(alpha: 0.4), size: 20),
-                        onPressed: () => Navigator.of(context).push(
-                          MaterialPageRoute(builder: (_) => const SettingsPage()),
-                        ),
-                      ),
+      body: Stack(
+        children: [
+          if (_carMode)
+            Positioned.fill(child: _buildFullScreenMap())
+          else
+            Positioned.fill(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 100),
+                color: _flash ? _scoreColor().withValues(alpha: 0.3) : Colors.black,
+              ),
+            ),
+          if (_carMode)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.black.withValues(alpha: 0.65),
+                        Colors.transparent,
+                        Colors.transparent,
+                        Colors.black.withValues(alpha: 0.6),
+                        Colors.black,
+                      ],
+                      stops: const [0.0, 0.12, 0.45, 0.72, 1.0],
                     ),
-                    Positioned(
-                      right: 8,
-                      child: IconButton(
-                        icon: Icon(Icons.logout, color: Colors.white.withValues(alpha: 0.4), size: 20),
-                        onPressed: () => Supabase.instance.client.auth.signOut(),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ),
-              const SizedBox(height: 4),
-              const Text('Moaner', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white)),
-              Text(_carMode ? 'Drive faster...' : 'Shake or slap your phone',
-                  style: TextStyle(fontSize: 14, color: Colors.white.withValues(alpha: 0.5))),
-
-              const SizedBox(height: 24),
-
-              // Score bar
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: Column(
-                  children: [
-                    // Score number + label
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          _score.toInt().toString(),
-                          style: TextStyle(
-                            fontSize: 56,
-                            fontWeight: FontWeight.w800,
-                            color: _scoreColor(),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(_scoreLabel(), style: const TextStyle(fontSize: 28)),
-                      ],
-                    ),
-
-                    const SizedBox(height: 8),
-
-                    // Progress bar
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: SizedBox(
-                        height: 16,
-                        child: Stack(
+            ),
+          if (_carMode && _flash)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 100),
+                  color: _scoreColor().withValues(alpha: 0.2),
+                ),
+              ),
+            ),
+          SafeArea(
+            child: Column(
+              children: [
+                SizedBox(
+                  width: double.infinity,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      const Text('😩', style: TextStyle(fontSize: 50)),
+                      Positioned(
+                        left: 8,
+                        child: Row(
                           children: [
-                            // Background
-                            Container(
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.1),
-                                borderRadius: BorderRadius.circular(8),
+                            IconButton(
+                              icon: Icon(Icons.settings, color: Colors.white.withValues(alpha: 0.7), size: 22),
+                              onPressed: () => Navigator.of(context).push(
+                                MaterialPageRoute(builder: (_) => const SettingsPage()),
                               ),
                             ),
-                            // Fill
-                            AnimatedFractionallySizedBox(
-                              duration: const Duration(milliseconds: 80),
-                              widthFactor: scorePct,
-                              alignment: Alignment.centerLeft,
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  gradient: LinearGradient(
-                                    colors: [Colors.purple, _scoreColor()],
-                                  ),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                              ),
+                            IconButton(
+                              icon: Icon(Icons.emoji_events, color: Colors.white.withValues(alpha: 0.7), size: 22),
+                              onPressed: _openLeaderboard,
                             ),
                           ],
                         ),
                       ),
-                    ),
-
-                    const SizedBox(height: 4),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text('0', style: TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.3))),
-                        Text('Best: ${_maxScore.toInt()}', style: TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.3))),
-                        Text('100', style: TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.3))),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-
-              const Spacer(),
-
-              // Force circle
-              Container(
-                width: 220, height: 220,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: Color.lerp(Colors.white, _scoreColor(), scorePct)!,
-                    width: 2 + scorePct * 3,
-                  ),
-                ),
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                          _carMode ? _currentSpeed.toInt().toString() : _currentForce.toStringAsFixed(1),
-                          style: TextStyle(fontSize: 56, fontWeight: FontWeight.w200,
-                              color: Color.lerp(Colors.white, _scoreColor(), scorePct))),
-                      Text(_carMode ? 'km/h' : 'm/s²', style: TextStyle(fontSize: 18, color: Colors.white)),
                     ],
                   ),
                 ),
-              ),
+                const SizedBox(height: 4),
+                const Text('Moaner', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white)),
+                Text(_carMode ? 'Drive faster...' : 'Shake or slap your phone',
+                    style: TextStyle(fontSize: 14, color: Colors.white.withValues(alpha: 0.7))),
 
-              const SizedBox(height: 20),
+                const Spacer(),
 
-              const Spacer(),
-
-              const SizedBox(height: 16),
-
-              // Car mode toggle
-              GestureDetector(
-                onTap: () {
-                  _toggleCarMode();
-                  HapticFeedback.mediumImpact();
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: _carMode ? Colors.purple.shade800 : Colors.orange.shade800,
-                    borderRadius: BorderRadius.circular(30),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
+                // Score bar (now near bottom, just above force circle)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 32),
+                  child: Column(
                     children: [
-                      Icon(_carMode ? Icons.vibration : Icons.directions_car, color: Colors.white, size: 18),
-                      const SizedBox(width: 8),
-                      Text(
-                        _carMode ? 'Switch to Shake Mode' : 'Switch to Drive Mode',
-                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            _score.toInt().toString(),
+                            style: TextStyle(
+                              fontSize: 56,
+                              fontWeight: FontWeight.w800,
+                              color: _scoreColor(),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(_scoreLabel(), style: const TextStyle(fontSize: 28)),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: SizedBox(
+                          height: 16,
+                          child: Stack(
+                            children: [
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                              ),
+                              AnimatedFractionallySizedBox(
+                                duration: const Duration(milliseconds: 80),
+                                widthFactor: scorePct,
+                                alignment: Alignment.centerLeft,
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      colors: [Colors.purple, _scoreColor()],
+                                    ),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text('0', style: TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.5))),
+                          Text('Best: ${_maxScore.toInt()}', style: TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.5))),
+                          Text('100', style: TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.5))),
+                        ],
                       ),
                     ],
                   ),
                 ),
-              ),
 
-              const SizedBox(height: 30),
-            ],
+                const SizedBox(height: 16),
+
+                Container(
+                  width: 180, height: 180,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: Color.lerp(Colors.white, _scoreColor(), scorePct)!,
+                      width: 2 + scorePct * 3,
+                    ),
+                  ),
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                            _carMode ? _currentSpeed.toInt().toString() : _currentForce.toStringAsFixed(1),
+                            style: TextStyle(fontSize: 48, fontWeight: FontWeight.w200,
+                                color: Color.lerp(Colors.white, _scoreColor(), scorePct))),
+                        Text(_carMode ? 'km/h' : 'm/s²', style: const TextStyle(fontSize: 16, color: Colors.white)),
+                      ],
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 16),
+
+                GestureDetector(
+                  onTap: () {
+                    _toggleCarMode();
+                    HapticFeedback.mediumImpact();
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: _carMode ? Colors.purple.shade800 : Colors.orange.shade800,
+                      borderRadius: BorderRadius.circular(30),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(_carMode ? Icons.vibration : Icons.directions_car, color: Colors.white, size: 18),
+                        const SizedBox(width: 8),
+                        Text(
+                          _carMode ? 'Switch to Shake Mode' : 'Switch to Drive Mode',
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 30),
+              ],
+            ),
           ),
-        ),
+        ],
       ),
     );
   }
 }
 
-class SettingsPage extends StatelessWidget {
+class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
 
-  Future<void> _deleteAccount(BuildContext context) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: Colors.grey.shade900,
-        title: const Text('Delete Account', style: TextStyle(color: Colors.white)),
-        content: const Text(
-          'This will permanently delete your account and all associated data. This action cannot be undone.',
-          style: TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
-    );
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
 
-    if (confirmed != true || !context.mounted) return;
-
-    try {
-      await Supabase.instance.client.rpc('delete_user');
-      await Supabase.instance.client.auth.signOut();
-      if (context.mounted) {
-        Navigator.of(context).popUntil((route) => route.isFirst);
-      }
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to delete account'), backgroundColor: Colors.red),
-        );
-      }
-    }
+class _SettingsPageState extends State<SettingsPage> {
+  Future<void> _changeName() async {
+    final name = await showDisplayNameDialog(context);
+    if (name == null || name.isEmpty) return;
+    await Leaderboard.setDisplayName(name);
+    if (mounted) setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
-    final email = Supabase.instance.client.auth.currentUser?.email ?? '';
-
+    final name = Leaderboard.displayName;
     return Scaffold(
+      backgroundColor: Colors.black,
       appBar: AppBar(
         title: const Text('Settings'),
         backgroundColor: Colors.black,
@@ -660,25 +858,71 @@ class SettingsPage extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Signed in as', style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 14)),
+            Text('Leaderboard name', style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 14)),
             const SizedBox(height: 4),
-            Text(email, style: const TextStyle(color: Colors.white, fontSize: 16)),
-            const Spacer(),
-            SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
-                onPressed: () => _deleteAccount(context),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red.shade900,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    name ?? 'Not set',
+                    style: TextStyle(
+                      color: name == null ? Colors.white38 : Colors.white,
+                      fontSize: 16,
+                    ),
+                  ),
                 ),
-                child: const Text('Delete Account', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                TextButton(
+                  onPressed: _changeName,
+                  child: const Text('Change', style: TextStyle(color: Colors.purpleAccent)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            _settingsButton(
+              context,
+              icon: Icons.emoji_events,
+              label: 'Leaderboard',
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const LeaderboardPage()),
               ),
             ),
-            const SizedBox(height: 40),
+            const SizedBox(height: 12),
+            _settingsButton(
+              context,
+              icon: Icons.route,
+              label: 'Trip History',
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const TripHistoryPage()),
+              ),
+            ),
+            const SizedBox(height: 12),
+            _settingsButton(
+              context,
+              icon: Icons.shield_outlined,
+              label: 'Drive Safety',
+              onTap: () => showSafetyDialog(context),
+            ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _settingsButton(BuildContext context, {required IconData icon, required String label, required VoidCallback onTap}) {
+    return SizedBox(
+      width: double.infinity,
+      height: 50,
+      child: ElevatedButton.icon(
+        onPressed: onTap,
+        icon: Icon(icon),
+        label: Align(
+          alignment: Alignment.centerLeft,
+          child: Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        ),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.grey.shade900,
+          foregroundColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
       ),
     );
