@@ -31,9 +31,7 @@ class LeaderboardEntry {
 class Leaderboard {
   static const _kDeviceId = 'leaderboard_device_id';
   static const _kDisplayName = 'leaderboard_display_name';
-  static const _kBestSubmitted = 'leaderboard_best_submitted';
-  static const _kLastSubmit = 'leaderboard_last_submit_ms';
-  static const _minSubmitIntervalMs = 30000;
+  static const _kBestSubmittedPrefix = 'leaderboard_best_submitted_';
 
   static late SharedPreferences _prefs;
   static late String _deviceId;
@@ -53,7 +51,15 @@ class Leaderboard {
   static String? get displayName => _prefs.getString(_kDisplayName);
 
   static Future<void> setDisplayName(String name) async {
-    await _prefs.setString(_kDisplayName, name.trim());
+    final trimmed = name.trim();
+    await _prefs.setString(_kDisplayName, trimmed);
+    // Push name update to Supabase for all of this device's existing rows.
+    try {
+      await Supabase.instance.client
+          .from('scores')
+          .update({'display_name': trimmed})
+          .eq('device_id', _deviceId);
+    } catch (_) {}
   }
 
   static bool get hasDisplayName {
@@ -61,16 +67,13 @@ class Leaderboard {
     return n != null && n.isNotEmpty;
   }
 
-  static int get bestSubmittedScore => _prefs.getInt(_kBestSubmitted) ?? 0;
+  static int bestSubmittedScore(String mode) =>
+      _prefs.getInt(_kBestSubmittedPrefix + mode) ?? 0;
 
   static Future<bool> submitScore({required int score, required String mode}) async {
     if (!hasDisplayName) return false;
-    if (score <= bestSubmittedScore) return false;
+    if (score <= bestSubmittedScore(mode)) return false;
     if (score < 0 || score > 100) return false;
-
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final last = _prefs.getInt(_kLastSubmit) ?? 0;
-    if (now - last < _minSubmitIntervalMs) return false;
 
     try {
       await Supabase.instance.client.from('scores').upsert({
@@ -79,9 +82,8 @@ class Leaderboard {
         'score': score,
         'mode': mode,
         'updated_at': DateTime.now().toUtc().toIso8601String(),
-      }, onConflict: 'device_id');
-      await _prefs.setInt(_kBestSubmitted, score);
-      await _prefs.setInt(_kLastSubmit, now);
+      }, onConflict: 'device_id,mode');
+      await _prefs.setInt(_kBestSubmittedPrefix + mode, score);
       return true;
     } catch (_) {
       return false;

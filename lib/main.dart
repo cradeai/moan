@@ -7,16 +7,13 @@ import 'package:sensors_plus/sensors_plus.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:uuid/uuid.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'leaderboard.dart';
 import 'leaderboard_page.dart';
-import 'trip.dart';
-import 'trip_summary_page.dart';
-import 'trip_history_page.dart';
 import 'onboarding_page.dart';
 import 'safety_dialog.dart';
+import 'sound_packs.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -25,6 +22,7 @@ Future<void> main() async {
     anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBpbWJuYnFtZG55aHpqbmR3aG1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUxMjEwODEsImV4cCI6MjA5MDY5NzA4MX0.Gjr0JCa9EjqyctFSs1mH2SCXtnGJZCEglduxAZI35QY',
   );
   await Leaderboard.init();
+  await SoundPacks.init();
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
@@ -41,7 +39,7 @@ class MoanApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Moaner',
+      title: 'Vroomy',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(scaffoldBackgroundColor: Colors.black),
       home: const RootGate(),
@@ -114,13 +112,15 @@ class _MoanPageState extends State<MoanPage> {
   // Score system
   double _score = 0;
   double _maxScore = 0;
+  double _accelBoost = 0; // drive mode: extra score above speed baseline
   static const double _maxScoreLimit = 100.0;
   static const double _decayRate = 8.0; // points per second decay (shake)
-  static const double _carDecayRate = 5.0; // points per second decay (drive)
+  static const double _accelBoostDecay = 4.0; // boost decay per second (drive)
   static const int _shakeCooldownMs = 200;
   DateTime _lastShakeTime = DateTime.fromMillisecondsSinceEpoch(0);
 
-  TripBuilder? _tripBuilder;
+  double _speedBase(double kmh) => (kmh * 0.7).clamp(0.0, 80.0);
+
   final List<LatLng> _liveRoute = [];
   LatLng? _liveCenter;
   final MapController _mapController = MapController();
@@ -129,25 +129,35 @@ class _MoanPageState extends State<MoanPage> {
   static const double _rotationMinSpeedKmh = 8.0;
 
 
+
   @override
   void initState() {
     super.initState();
     _startLoop();
     WidgetsBinding.instance.addPostFrameCallback((_) => _initPrimaryMode());
     _decayTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-      if (_score > 0) {
-        setState(() {
-          final decay = _carMode ? _carDecayRate : _decayRate;
-          _score = (_score - decay * 0.05).clamp(0.0, _maxScoreLimit);
-        });
+      if (_carMode) {
+        if (_accelBoost > 0) {
+          setState(() {
+            _accelBoost = (_accelBoost - _accelBoostDecay * 0.05).clamp(0.0, 100.0);
+            _score = (_speedBase(_currentSpeed) + _accelBoost).clamp(0.0, _maxScoreLimit);
+          });
+        }
+      } else {
+        if (_score > 0) {
+          setState(() {
+            _score = (_score - _decayRate * 0.05).clamp(0.0, _maxScoreLimit);
+          });
+        }
       }
     });
   }
 
   Future<void> _initPrimaryMode() async {
     final ok = await _enableDriveMode(showErrors: false);
-    if (!ok) await _enableShakeMode(saveTrip: false);
+    if (!ok) await _enableShakeMode();
   }
+
 
   Future<void> _openLeaderboard() async {
     if (!Leaderboard.hasDisplayName) {
@@ -173,6 +183,28 @@ class _MoanPageState extends State<MoanPage> {
   double _lastLightVol = -1;
   double _lastMediumVol = -1;
   double _lastIntenseVol = -1;
+  double _lastRate = -1;
+  double _smoothedRateTarget = 1.0;
+
+  Future<void> _reloadSoundPack() async {
+    await _lightPlayer.stop();
+    await _mediumPlayer.stop();
+    await _intensePlayer.stop();
+    _lastLightVol = -1;
+    _lastMediumVol = -1;
+    _lastIntenseVol = -1;
+    _lastRate = -1;
+    _smoothedRateTarget = 1.0;
+    await _lightPlayer.setPlaybackRate(1.0);
+    final pack = SoundPacks.current;
+    if (pack.type == PackType.crossfade) {
+      await _lightPlayer.play(AssetSource(pack.light), volume: 0);
+      await _mediumPlayer.play(AssetSource(pack.medium), volume: 0);
+      await _intensePlayer.play(AssetSource(pack.intense), volume: 0);
+    } else {
+      await _lightPlayer.play(AssetSource(pack.single), volume: 0);
+    }
+  }
 
   Future<void> _startLoop() async {
     print('[AUDIO] _startLoop begin');
@@ -194,12 +226,18 @@ class _MoanPageState extends State<MoanPage> {
       await _intensePlayer.setReleaseMode(ReleaseMode.loop);
       print('[AUDIO] release modes set');
 
-      await _lightPlayer.play(AssetSource('audio/light_loop.mp3'), volume: 0);
-      print('[AUDIO] light playing');
-      await _mediumPlayer.play(AssetSource('audio/medium_loop.mp3'), volume: 0);
-      print('[AUDIO] medium playing');
-      await _intensePlayer.play(AssetSource('audio/intense_loop.mp3'), volume: 0);
-      print('[AUDIO] intense playing');
+      final pack = SoundPacks.current;
+      if (pack.type == PackType.crossfade) {
+        await _lightPlayer.play(AssetSource(pack.light), volume: 0);
+        print('[AUDIO] light playing (${pack.id})');
+        await _mediumPlayer.play(AssetSource(pack.medium), volume: 0);
+        print('[AUDIO] medium playing (${pack.id})');
+        await _intensePlayer.play(AssetSource(pack.intense), volume: 0);
+        print('[AUDIO] intense playing (${pack.id})');
+      } else {
+        await _lightPlayer.play(AssetSource(pack.single), volume: 0);
+        print('[AUDIO] single playing (${pack.id})');
+      }
 
       _playersStarted = true;
       print('[AUDIO] all 3 loops started');
@@ -215,6 +253,25 @@ class _MoanPageState extends State<MoanPage> {
 
   void _updateCrossfade() {
     final score = _score;
+
+    // Rate-modulated packs (e.g. Engine): single file, vary rate + volume.
+    // Drive mode only — engine doesn't make sense without a car.
+    if (SoundPacks.current.type == PackType.rateModulated) {
+      final normalized = (score / 100).clamp(0.0, 1.0);
+      final targetRate = 0.9 + normalized * 0.5; // narrow range: 0.9 -> 1.4
+      _smoothedRateTarget = _smoothedRateTarget * 0.85 + targetRate * 0.15;
+      final targetVol = (!_carMode || score <= 0) ? 0.0 : (0.15 + normalized * 0.85).clamp(0.0, 1.0);
+      final isSilent = targetVol == 0.0;
+      if (isSilent || (targetVol - _lastLightVol).abs() > 0.02) {
+        _lightPlayer.setVolume(targetVol).catchError((e) => print('[VOL ERR engine] $e'));
+        _lastLightVol = targetVol;
+      }
+      if (_carMode && (_smoothedRateTarget - _lastRate).abs() > 0.05) {
+        _lightPlayer.setPlaybackRate(_smoothedRateTarget).catchError((e) => print('[RATE ERR engine] $e'));
+        _lastRate = _smoothedRateTarget;
+      }
+      return;
+    }
 
     // Compute volume for each band with overlapping triangular fades
     // Light:   peaks at score 15, fades out by 50
@@ -330,7 +387,7 @@ class _MoanPageState extends State<MoanPage> {
       _onPosition,
       onError: (e) {
         if (!mounted) return;
-        _enableShakeMode(saveTrip: false);
+        _enableShakeMode();
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Location unavailable, switched to Shake Mode'),
@@ -341,10 +398,6 @@ class _MoanPageState extends State<MoanPage> {
     );
 
     _minSpeedSinceLastTrigger = 0;
-    _tripBuilder = TripBuilder(
-      id: const Uuid().v4(),
-      startedAt: DateTime.now(),
-    );
     _liveRoute.clear();
     _liveCenter = null;
 
@@ -357,25 +410,18 @@ class _MoanPageState extends State<MoanPage> {
     return true;
   }
 
-  Future<void> _enableShakeMode({bool saveTrip = true}) async {
+  Future<void> _enableShakeMode() async {
     _positionSub?.cancel();
     _lastPosition = null;
     _currentSpeed = 0;
     _score = 0;
-
-    final builder = _tripBuilder;
-    _tripBuilder = null;
-    if (saveTrip && builder != null && builder.hasPoints) {
-      final trip = builder.build();
-      final saved = await TripStore.save(trip);
-      if (saved && mounted) {
-        Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => TripSummaryPage(trip: trip)),
-        );
-      }
-    }
-
+    _accelBoost = 0;
     _startListening();
+    // Engine pack doesn't work in shake mode — switch to Moan.
+    if (SoundPacks.current.type == PackType.rateModulated) {
+      await SoundPacks.setCurrent(SoundPacks.moan);
+      await _reloadSoundPack();
+    }
     if (mounted) setState(() => _carMode = false);
   }
 
@@ -445,13 +491,14 @@ class _MoanPageState extends State<MoanPage> {
     final now = DateTime.now();
     final dt = now.difference(_lastAccelTime).inMilliseconds / 1000.0;
     double accel = 0;
-    if (dt > 0.2 && dt < 5) {
-      accel = (smoothed - _lastSpeedForAccel) / dt;
+    if (dt > 0.2) {
+      if (dt < 5) {
+        accel = (smoothed - _lastSpeedForAccel) / dt;
+      }
+      // Always reset baseline so a long GPS gap doesn't permanently break accel calc.
       _lastSpeedForAccel = smoothed;
       _lastAccelTime = now;
     }
-
-    _tripBuilder?.addPoint(position.latitude, position.longitude, smoothed);
 
     final newPoint = LatLng(position.latitude, position.longitude);
     final shouldAddToRoute = _liveRoute.isEmpty ||
@@ -485,18 +532,19 @@ class _MoanPageState extends State<MoanPage> {
       }
     } catch (_) {}
 
+    double points = 0;
     setState(() {
       _currentSpeed = smoothed;
       _currentForce = smoothed;
-      if (accel > 3) {
-        final points = (accel - 3) * (accel - 3) * 1.0;
-        _score = (_score + points).clamp(0.0, _maxScoreLimit);
-        if (_score > _maxScore) {
-          _maxScore = _score;
-          Leaderboard.submitScore(score: _maxScore.toInt(), mode: 'drive');
-        }
-        _tripBuilder?.updateScore(_score.toInt());
-        _flash = true;
+      if (accel > 1.0) {
+        points = (accel - 1.0) * (accel - 1.0) * 2.0;
+        _accelBoost = (_accelBoost + points).clamp(0.0, 40.0);
+        _flash = accel > 3.0;
+      }
+      _score = (_speedBase(smoothed) + _accelBoost).clamp(0.0, _maxScoreLimit);
+      if (_score > _maxScore) {
+        _maxScore = _score;
+        Leaderboard.submitScore(score: _maxScore.toInt(), mode: 'drive');
       }
       _gpsDebug = 'GPS #$_gpsUpdates | ${speedKmh.toStringAsFixed(0)} km/h | accel: ${accel.toStringAsFixed(1)}';
     });
@@ -546,7 +594,7 @@ class _MoanPageState extends State<MoanPage> {
     if (_score < 50) return '🔥🔥';
     if (_score < 75) return '🔥🔥🔥';
     if (_score < 90) return '💀💀💀';
-    return '😩💦💦💦';
+    return '🔥💨💨💨';
   }
 
   Color _scoreColor() {
@@ -588,19 +636,9 @@ class _MoanPageState extends State<MoanPage> {
               urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
               userAgentPackageName: 'com.moan.moan',
             ),
-            if (_liveRoute.length > 1)
-              PolylineLayer(
-                polylines: [
-                  Polyline(
-                    points: _liveRoute,
-                    strokeWidth: 5,
-                    color: _scoreColor(),
-                  ),
-                ],
-              ),
           ],
         ),
-        // Fixed arrow marker centered on screen, always pointing up.
+        // Fixed arrow marker centered on screen.
         IgnorePointer(
           child: Center(
             child: Container(
@@ -673,34 +711,43 @@ class _MoanPageState extends State<MoanPage> {
               children: [
                 SizedBox(
                   width: double.infinity,
+                  height: 48,
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
-                      const Text('😩', style: TextStyle(fontSize: 50)),
+                      const Text(
+                        'Vroomy',
+                        style: TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
                       Positioned(
                         left: 8,
-                        child: Row(
-                          children: [
-                            IconButton(
-                              icon: Icon(Icons.settings, color: Colors.white.withValues(alpha: 0.7), size: 22),
-                              onPressed: () => Navigator.of(context).push(
-                                MaterialPageRoute(builder: (_) => const SettingsPage()),
-                              ),
-                            ),
-                            IconButton(
-                              icon: Icon(Icons.emoji_events, color: Colors.white.withValues(alpha: 0.7), size: 22),
-                              onPressed: _openLeaderboard,
-                            ),
-                          ],
+                        child: IconButton(
+                          icon: Icon(Icons.settings, color: Colors.white.withValues(alpha: 0.85), size: 24),
+                          onPressed: () async {
+                            final initialPackId = SoundPacks.current.id;
+                            await Navigator.of(context).push(
+                              MaterialPageRoute(builder: (_) => SettingsPage(carMode: _carMode)),
+                            );
+                            if (SoundPacks.current.id != initialPackId) {
+                              await _reloadSoundPack();
+                            }
+                          },
+                        ),
+                      ),
+                      Positioned(
+                        right: 8,
+                        child: IconButton(
+                          icon: Icon(Icons.emoji_events, color: Colors.white.withValues(alpha: 0.85), size: 24),
+                          onPressed: _openLeaderboard,
                         ),
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(height: 4),
-                const Text('Moaner', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white)),
-                Text(_carMode ? 'Drive faster...' : 'Shake or slap your phone',
-                    style: TextStyle(fontSize: 14, color: Colors.white.withValues(alpha: 0.7))),
 
                 const Spacer(),
 
@@ -715,13 +762,13 @@ class _MoanPageState extends State<MoanPage> {
                           Text(
                             _score.toInt().toString(),
                             style: TextStyle(
-                              fontSize: 56,
+                              fontSize: _carMode ? 38 : 56,
                               fontWeight: FontWeight.w800,
                               color: _scoreColor(),
                             ),
                           ),
-                          const SizedBox(width: 8),
-                          Text(_scoreLabel(), style: const TextStyle(fontSize: 28)),
+                          SizedBox(width: _carMode ? 6 : 8),
+                          Text(_scoreLabel(), style: TextStyle(fontSize: _carMode ? 20 : 28)),
                         ],
                       ),
                       const SizedBox(height: 8),
@@ -767,15 +814,16 @@ class _MoanPageState extends State<MoanPage> {
                   ),
                 ),
 
-                const SizedBox(height: 16),
+                SizedBox(height: _carMode ? 10 : 16),
 
                 Container(
-                  width: 180, height: 180,
+                  width: _carMode ? 120 : 200,
+                  height: _carMode ? 120 : 200,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     border: Border.all(
                       color: Color.lerp(Colors.white, _scoreColor(), scorePct)!,
-                      width: 2 + scorePct * 3,
+                      width: 2 + scorePct * (_carMode ? 2 : 3),
                     ),
                   ),
                   child: Center(
@@ -784,15 +832,21 @@ class _MoanPageState extends State<MoanPage> {
                       children: [
                         Text(
                             _carMode ? _currentSpeed.toInt().toString() : _currentForce.toStringAsFixed(1),
-                            style: TextStyle(fontSize: 48, fontWeight: FontWeight.w200,
-                                color: Color.lerp(Colors.white, _scoreColor(), scorePct))),
-                        Text(_carMode ? 'km/h' : 'm/s²', style: const TextStyle(fontSize: 16, color: Colors.white)),
+                            style: TextStyle(
+                              fontSize: _carMode ? 32 : 56,
+                              fontWeight: FontWeight.w200,
+                              color: Color.lerp(Colors.white, _scoreColor(), scorePct),
+                            )),
+                        Text(
+                          _carMode ? 'km/h' : 'm/s²',
+                          style: TextStyle(fontSize: _carMode ? 12 : 18, color: Colors.white),
+                        ),
                       ],
                     ),
                   ),
                 ),
 
-                const SizedBox(height: 16),
+                SizedBox(height: _carMode ? 10 : 16),
 
                 GestureDetector(
                   onTap: () {
@@ -830,7 +884,8 @@ class _MoanPageState extends State<MoanPage> {
 }
 
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key});
+  final bool carMode;
+  const SettingsPage({super.key, this.carMode = true});
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -841,6 +896,11 @@ class _SettingsPageState extends State<SettingsPage> {
     final name = await showDisplayNameDialog(context);
     if (name == null || name.isEmpty) return;
     await Leaderboard.setDisplayName(name);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _selectSoundPack(SoundPack pack) async {
+    await SoundPacks.setCurrent(pack);
     if (mounted) setState(() {});
   }
 
@@ -878,21 +938,52 @@ class _SettingsPageState extends State<SettingsPage> {
               ],
             ),
             const SizedBox(height: 24),
+            Text('Sound Pack', style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 14)),
+            const SizedBox(height: 8),
+            ...SoundPacks.all.where((p) => widget.carMode || p.type != PackType.rateModulated).map((pack) {
+              final selected = SoundPacks.current.id == pack.id;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: GestureDetector(
+                  onTap: () => _selectSoundPack(pack),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                    decoration: BoxDecoration(
+                      color: selected ? Colors.purple.withValues(alpha: 0.2) : Colors.grey.shade900,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: selected ? Colors.purpleAccent : Colors.transparent,
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          selected ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+                          color: selected ? Colors.purpleAccent : Colors.white38,
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          pack.name,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }),
+            const SizedBox(height: 24),
             _settingsButton(
               context,
               icon: Icons.emoji_events,
               label: 'Leaderboard',
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const LeaderboardPage()),
-              ),
-            ),
-            const SizedBox(height: 12),
-            _settingsButton(
-              context,
-              icon: Icons.route,
-              label: 'Trip History',
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const TripHistoryPage()),
               ),
             ),
             const SizedBox(height: 12),

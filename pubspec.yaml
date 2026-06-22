@@ -46,9 +46,6 @@ dependencies:
   uuid: ^4.5.0
   flutter_map: ^7.0.2
   latlong2: ^0.9.1
-  screenshot: ^3.0.0
-  share_plus: ^10.1.4
-  path_provider: ^2.1.5
 
 dev_dependencies:
   flutter_test:
@@ -74,6 +71,8 @@ flutter:
   assets:
     - assets/audio/
     - assets/audio/moan/
+    - assets/audio/packs/fart/
+    - assets/audio/packs/engine/
     - assets/images/
   #   - images/a_dot_ham.jpeg
 
